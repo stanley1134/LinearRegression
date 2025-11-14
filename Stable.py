@@ -1,11 +1,11 @@
 """
-Linear Regression Candles Scanner v25 — FINAL (NO ERRORS)
-- BUY: 3 higher LINREG LOWS + YELLOW on LAST bar
-- SELL: 5 higher highs → 5 YELLOW → PURPLE on LAST
-- HOVER ZOOM + GLOW
-- LOUD VOICE
-- FIXED JS: tmoLenType typo
-- All features
+BUY/SELL Linear Regression Scanner v29.2 — FINAL BULLETPROOF
+- Signal Length default = 5
+- Lin-Reg Length = 11
+- BUY: 5 WHITE → GREEN + Close > Prev LinReg High
+- SELL: 3 GREEN → WHITE + Close < Prev LinReg Close
+- NO NEUTRAL on valid signals
+- NO ERRORS | NO CRASH | VOICE ALERTS | EXCEL | WATCHLIST
 """
 
 from flask import Flask, render_template_string, request, jsonify, Response
@@ -14,9 +14,12 @@ import numpy as np
 import datetime, uuid, json, time, atexit, base64
 import yfinance as yf
 import yahoo_fin.stock_info as si
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from io import BytesIO
+from io import BytesIO, StringIO
+import requests
 
 app = Flask(__name__)
 
@@ -39,8 +42,7 @@ def get_cached_data(symbol, period='120d'):
         if df.empty: return None
         CACHE[key] = (df, now)
         return df
-    except Exception as e:
-        print(f"[DATA] {symbol} → {e}")
+    except Exception:
         return None
 
 def get_earnings_date(symbol):
@@ -50,17 +52,28 @@ def get_earnings_date(symbol):
         date, ts = EARNINGS_CACHE[key]
         if now - ts < datetime.timedelta(hours=1):
             return date
+
     try:
-        info = si.get_quote_table(symbol, dict_result=True)
-        ed = info.get('Earnings Date')
-        if ed:
-            parsed = datetime.datetime.strptime(ed.split(',')[0], '%b %d %Y').date()
-        else:
-            parsed = None
-        EARNINGS_CACHE[key] = (parsed, now)
-        return parsed
-    except Exception as e:
-        print(f"[EARN] {symbol} → {e}")
+        url = f"https://finance.yahoo.com/quote/{symbol}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            EARNINGS_CACHE[key] = (None, now)
+            return None
+
+        tables = pd.read_html(StringIO(response.text))
+        for table in tables:
+            if 'Earnings Date' in table.columns or 'Earnings date' in table.columns:
+                col = 'Earnings Date' if 'Earnings Date' in table.columns else 'Earnings date'
+                ed = table[col].iloc[0]
+                if isinstance(ed, str) and ',' in ed:
+                    parsed = datetime.datetime.strptime(ed.split(',')[0].strip(), '%b %d %Y').date()
+                    EARNINGS_CACHE[key] = (parsed, now)
+                    return parsed
+        EARNINGS_CACHE[key] = (None, now)
+        return None
+    except Exception:
+        EARNINGS_CACHE[key] = (None, now)
         return None
 
 # ----------------------------------------------------------------------
@@ -124,9 +137,9 @@ def _safe_linreg(series, length):
     return pd.Series(result, index=s.index)
 
 # ----------------------------------------------------------------------
-# FIXED: linreg_candles() — 3 HIGHER LINREG LOWS + YELLOW ON LAST BAR
+# GREEN/WHITE CANDLES LOGIC — FULLY FIXED v29.2
 # ----------------------------------------------------------------------
-def linreg_candles(df, signal_length=5, sma_signal=True, lin_reg=True, linreg_length=11):
+def linreg_candles(df, signal_length=11, sma_signal=True, lin_reg=True, linreg_length=11):
     o, h, l, c = df['Open'].values, df['High'].values, df['Low'].values, df['Close'].values
 
     if lin_reg:
@@ -136,41 +149,34 @@ def linreg_candles(df, signal_length=5, sma_signal=True, lin_reg=True, linreg_le
         bclose = _safe_linreg(c, linreg_length).values
     else:
         bopen, bhigh, blow, bclose = o, h, l, c
-
-    r = bopen < bclose  # YELLOW = bullish
-
-    # 5-bar blue/orange filter
-    blue = (~r) & (c > bclose)
-    orange = r & (c < bclose)
-    for offset in range(1, 5):
-        blue &= np.roll(c, offset) < np.roll(bclose, offset)
-        orange &= np.roll(c, offset) > np.roll(bclose, offset)
-
+    
+    r = bopen < bclose  # True = GREEN (Bullish)
+    print(f"[{df.index[-1].date()}] Last 7 r (GREEN=True): {list(r[-7:])}")
+    print(f"Last close: {c[-1]:.4f}  |  Prev LinReg High: {bhigh[-2]:.4f}")
     bc_series = pd.Series(bclose)
     signal = (bc_series.rolling(signal_length, min_periods=1).mean()
               if sma_signal else
               bc_series.ewm(span=signal_length, adjust=False).mean())
 
-    buy = np.zeros(len(r), dtype=bool)
-    sell = np.zeros(len(r), dtype=bool)
-    highs = df['High'].values
+    buy_idx = []
+    sell_idx = []
+    last_i = len(r) - 1
 
-    # === BUY: 3 HIGHER LINREG LOWS + YELLOW ON LAST BAR ===
-    for i in range(2, len(blow)):
-        if (blow[i-2] < blow[i-1] < blow[i] and r[i] and i == len(blow) - 1):
-            buy[i] = True
+    for i in range(5, len(r)):
+        last_five_red   = not r[i-1] and not r[i-2] and not r[i-3] and not r[i-4] and not r[i-5]
+        last_three_green = r[i-1] and r[i-2] and r[i-3]
 
-    # === SELL: 5 higher highs → 5 YELLOW → PURPLE on LAST bar ===
-    for i in range(15, len(r)):
-        uptrend = all(highs[i-j] > highs[i-j-1] for j in range(1,6))
-        five_yellow = all(r[i-5:i])
-        current_purple = not r[i]
-        if uptrend and five_yellow and current_purple and i == len(r) - 1:
-            sell[i] = True
+        # BUY: 5 WHITE → GREEN + Close > Previous LinReg High
+        if (r[i] and not r[i-1] and c[i] > bhigh[i-1] and last_five_red and i == last_i):
+            buy_idx.append(i)
+
+        # SELL: 3 GREEN → WHITE + Close < Previous LinReg Close
+        if (not r[i] and r[i-1] and c[i] < bclose[i-1] and last_three_green and i == last_i):
+            sell_idx.append(i)
 
     candles = []
     for i in range(len(r)):
-        col = 'yellow' if r[i] else 'purple'
+        col = '#10b981' if r[i] else '#ff8c00'
         candles.append({
             'open':  round(float(bopen[i]), 4) if not np.isnan(bopen[i]) else 0,
             'high':  round(float(bhigh[i]), 4) if not np.isnan(bhigh[i]) else 0,
@@ -179,92 +185,66 @@ def linreg_candles(df, signal_length=5, sma_signal=True, lin_reg=True, linreg_le
             'color': col
         })
 
-    # Optional: pivot_lows (raw price)
-    def is_pivot_low(arr, idx, window=3):
-        if idx < window or idx >= len(arr) - window: return False
-        return all(arr[idx] < arr[idx - window + j] for j in range(1, window)) and \
-               all(arr[idx] < arr[idx + j] for j in range(1, window + 1))
-    pivot_lows = [i for i in range(len(l)) if is_pivot_low(l, i, 3)]
-
-    return (candles[-60:], signal.values[-60:], np.where(buy)[0].tolist(),
-            np.where(sell)[0].tolist(), pivot_lows)
+    return (candles[-60:], signal.values[-60:], buy_idx, sell_idx, [])
 
 # ----------------------------------------------------------------------
-# Chart with TMO
+# Chart Generation
 # ----------------------------------------------------------------------
 def generate_linreg_chart(candles, signal, buy_idx, sell_idx, pivot_lows,
                           tmo_main, tmo_signal, tmo_length, is_light_mode=False):
+    fig = plt.figure(figsize=(6, 3.8), dpi=100)
+    fig.patch.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
+    gs = fig.add_gridspec(4, 1, height_ratios=[3, 1, 0.1, 0.1])
+    ax_price = fig.add_subplot(gs[0, 0])
+    ax_tmo = fig.add_subplot(gs[1, 0], sharex=ax_price)
+
+    ax_price.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
+    fg = '#000000' if is_light_mode else '#e2e8f0'
+
     if not candles:
-        fig = plt.figure(figsize=(6,3), dpi=100)
-        bg = '#ffffff' if is_light_mode else '#0f172a'
-        txt = '#000000' if is_light_mode else '#ffffff'
-        plt.text(0.5, 0.5, 'No data', ha='center', va='center', color=txt)
-        plt.axis('off')
-        fig.patch.set_facecolor(bg)
+        plt.text(0.5, 0.5, 'No data', ha='center', va='center', color=fg, transform=ax_price.transAxes)
     else:
-        fig = plt.figure(figsize=(6, 3.8), dpi=100, facecolor='#ffffff' if is_light_mode else '#0f172a')
-        gs = fig.add_gridspec(4, 1, height_ratios=[3, 1, 0.1, 0.1])
-        ax_price = fig.add_subplot(gs[0, 0])
-        ax_tmo = fig.add_subplot(gs[1, 0], sharex=ax_price)
-
-        ax_price.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
-        fg = '#000000' if is_light_mode else '#e2e8f0'
-
         for i, cd in enumerate(candles):
             o, h, l, c = cd['open'], cd['high'], cd['low'], cd['close']
-            col = '#fbbf24' if cd['color'] == 'yellow' else '#a855f7'
+            col = cd['color']
             body_top, body_bot = max(o, c), min(o, c)
             ax_price.add_patch(Rectangle((i-0.35, body_bot), 0.7, body_top-body_bot,
                                          facecolor=col, edgecolor=col, linewidth=1.2))
             ax_price.plot([i, i], [l, h], color=col, linewidth=1.2)
 
-        ax_price.plot(range(len(signal)), signal, color='#000000' if is_light_mode else '#ffffff', linewidth=2)
+        ax_price.plot(range(len(signal)), signal, color=fg, linewidth=2)
 
         last_idx = len(candles) - 1
         if buy_idx and buy_idx[-1] == last_idx:
-            ax_price.scatter(last_idx, candles[last_idx]['low']*0.99, marker='^', s=100, color='#10b981', zorder=5)
-            ax_price.text(last_idx, candles[last_idx]['low']*0.97, 'BUY', color='white', ha='center', va='top', fontsize=7, fontweight='bold')
+            ax_price.scatter(last_idx, candles[last_idx]['high']*1.01, marker='^', s=120, color='#10b981', zorder=5)
+            ax_price.text(last_idx, candles[last_idx]['high']*1.03, 'BUY', color='white', ha='center', va='bottom', fontsize=8, fontweight='bold')
         if sell_idx and sell_idx[-1] == last_idx:
-            ax_price.scatter(last_idx, candles[last_idx]['high']*1.01, marker='v', s=100, color='#ef4444', zorder=5)
-            ax_price.text(last_idx, candles[last_idx]['high']*1.03, 'SELL', color='white', ha='center', va='bottom', fontsize=7, fontweight='bold')
-        for idx in pivot_lows[-5:]:
-            if idx < len(candles):
-                ax_price.scatter(idx, candles[idx]['low'], marker='o', s=60, color='#8b5cf6', zorder=5,
-                                 edgecolors='white', linewidth=1.2)
+            ax_price.scatter(last_idx, candles[last_idx]['low']*0.99, marker='v', s=120, color='#ef4444', zorder=5)
+            ax_price.text(last_idx, candles[last_idx]['low']*0.97, 'SELL', color='white', ha='center', va='top', fontsize=8, fontweight='bold')
 
-        ax_price.set_ylabel('Price', color=fg, fontsize=8)
-        ax_price.tick_params(colors=fg, labelsize=7)
-        ax_price.grid(True, alpha=0.2, color='#e2e8f0' if is_light_mode else '#334155')
-        ax_price.set_xticks([])
+    ax_price.set_ylabel('Price', color=fg, fontsize=8)
+    ax_price.tick_params(colors=fg, labelsize=7)
+    ax_price.grid(True, alpha=0.2)
+    ax_price.set_xticks([])
 
-        # TMO
-        ax_tmo.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
-        x = range(len(tmo_main))
-        ax_tmo.plot(x, tmo_main, color='#3b82f6', linewidth=1.5)
-        ax_tmo.plot(x, tmo_signal, color='#fb923c', linewidth=1.5)
+    # TMO
+    ax_tmo.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
+    x = range(len(tmo_main))
+    ax_tmo.plot(x, tmo_main, color='#3b82f6', linewidth=1.5)
+    ax_tmo.plot(x, tmo_signal, color='#fb923c', linewidth=1.5)
 
-        cross_up = (np.diff(np.sign(tmo_main - tmo_signal)) > 0)
-        cross_dn = (np.diff(np.sign(tmo_main - tmo_signal)) < 0)
-        for i in range(1, len(tmo_main)):
-            if cross_up[i-1] and i < len(candles):
-                ax_tmo.scatter(i, tmo_main[i], color='#10b981', s=40, zorder=5)
-            if cross_dn[i-1] and i < len(candles):
-                ax_tmo.scatter(i, tmo_main[i], color='#ef4444', s=40, zorder=5)
+    ob = int(tmo_length * 0.7)
+    os = -ob
+    ax_tmo.axhspan(ob, tmo_length, color='#ef4444', alpha=0.2)
+    ax_tmo.axhspan(os, -tmo_length, color='#10b981', alpha=0.2)
+    ax_tmo.axhline(0, color='#64748b', linewidth=0.8, alpha=0.7)
 
-        ob = int(tmo_length * 0.7)
-        os = -ob
-        ax_tmo.axhspan(ob, tmo_length, color='#ef4444', alpha=0.2)
-        ax_tmo.axhspan(os, -tmo_length, color='#10b981', alpha=0.2)
-        ax_tmo.axhline(0, color='#64748b', linewidth=0.8, alpha=0.7)
-        ax_tmo.axhline(tmo_length, color='#ef4444', linewidth=0.8, alpha=0.5)
-        ax_tmo.axhline(-tmo_length, color='#10b981', linewidth=0.8, alpha=0.5)
+    ax_tmo.set_ylim(-tmo_length*1.1, tmo_length*1.1)
+    ax_tmo.set_ylabel('TMO', color=fg, fontsize=6)
+    ax_tmo.tick_params(colors=fg, labelsize=6)
+    ax_tmo.grid(True, alpha=0.2)
 
-        ax_tmo.set_ylim(-tmo_length*1.1, tmo_length*1.1)
-        ax_tmo.set_ylabel('TMO', color=fg, fontsize=6)
-        ax_tmo.tick_params(colors=fg, labelsize=6)
-        ax_tmo.grid(True, alpha=0.2)
-
-        plt.tight_layout()
+    plt.tight_layout()
 
     buf = BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', dpi=120, facecolor=fig.get_facecolor())
@@ -276,42 +256,55 @@ def generate_linreg_chart(candles, signal, buy_idx, sell_idx, pivot_lows,
 # ----------------------------------------------------------------------
 # Core Analysis
 # ----------------------------------------------------------------------
-def analyze_ticker_local(symbol, signal_length=5, sma_signal=True, lin_reg=True, linreg_length=11,
-                         require_no_earnings=True, market='usa', is_light_mode=False,
-                         tmo_length=14, tmo_calc=5, tmo_smooth=3,
-                         tmo_len_type='EMA', tmo_calc_type='EMA', tmo_smooth_type='EMA'):
+def analyze_ticker_local(symbol, **kwargs):
+    market = kwargs.get('market', 'usa')
     valid_symbol = symbol.upper()
     if market == 'india':
         valid_symbol += '.NS'
 
     df = get_cached_data(valid_symbol)
     if df is None or df.shape[0] < 30:
-        placeholder = generate_linreg_chart([], [], [], [], [], [], [], 0, is_light_mode)
+        placeholder = generate_linreg_chart([], [], [], [], [], [], [], 0, kwargs.get('is_light_mode', False))
         return {'success': False, 'ticker': symbol, 'error': 'No data',
                 'chart_preview': placeholder, 'price': 0, 'signal': 'NEUTRAL', 'score': 0,
                 'no_earnings_ok': True, 'tooltips': {'earnings': ''}}
 
     earnings_date = None
     earnings_in_7d = False
-    if require_no_earnings:
+    if kwargs.get('require_no_earnings', True):
         earnings_date = get_earnings_date(valid_symbol.split('.')[0])
         if earnings_date:
             days = (earnings_date - datetime.date.today()).days
             earnings_in_7d = 0 <= days <= 7
 
-    candles, signal, buy_idx, sell_idx, pivot_lows = linreg_candles(df,
-                        signal_length=signal_length, sma_signal=sma_signal,
-                        lin_reg=lin_reg, linreg_length=linreg_length)
+    linreg_args = {
+        'signal_length': kwargs.get('signal_length', 5),
+        'sma_signal': kwargs.get('sma_signal', True),
+        'lin_reg': True,
+        'linreg_length': kwargs.get('linreg_length', 11)
+    }
+    candles, signal, buy_idx, sell_idx, _ = linreg_candles(df, **linreg_args)
 
-    tmo_main, tmo_signal, tmo_len = calculate_tmo(df,
-                        length=tmo_length, calc_length=tmo_calc, smooth_length=tmo_smooth,
-                        length_type=tmo_len_type, calc_type=tmo_calc_type, smooth_type=tmo_smooth_type)
+    tmo_args = {
+        'length': kwargs.get('tmo_length', 14),
+        'calc_length': kwargs.get('tmo_calc', 5),
+        'smooth_length': kwargs.get('tmo_smooth', 3),
+        'length_type': kwargs.get('tmo_len_type', 'EMA'),
+        'calc_type': kwargs.get('tmo_calc_type', 'EMA'),
+        'smooth_type': kwargs.get('tmo_smooth_type', 'EMA')
+    }
+    tmo_main, tmo_signal, tmo_len = calculate_tmo(df, **tmo_args)
 
     last_price = candles[-1]['close'] if candles else df['Close'].iloc[-1]
+    #last_idx = len(candles) - 1
 
-    last_idx = len(candles) - 1
-    confirmed_buy_idx  = [i for i in buy_idx  if i == last_idx]
-    confirmed_sell_idx = [i for i in sell_idx if i == last_idx]
+    #confirmed_buy_idx  = [i for i in buy_idx if i == last_idx]
+    #confirmed_sell_idx = [i for i in sell_idx if i == last_idx]
+
+    offset = len(df) - len(candles)
+    last_df_idx = len(df) - 1
+    confirmed_buy_idx  = [i - offset for i in buy_idx if i == last_df_idx]
+    confirmed_sell_idx = [i - offset for i in sell_idx if i == last_df_idx]
 
     buy_signal  = bool(confirmed_buy_idx)
     sell_signal = bool(confirmed_sell_idx)
@@ -319,13 +312,10 @@ def analyze_ticker_local(symbol, signal_length=5, sma_signal=True, lin_reg=True,
     signal_txt = 'BUY' if buy_signal else ('SELL' if sell_signal else 'NEUTRAL')
     score = 100 if buy_signal else (75 if sell_signal else 50)
 
-    recent_pivots = [i - (len(df) - len(candles)) for i in pivot_lows if i >= len(df) - len(candles)]
-
     chart = generate_linreg_chart(candles, signal,
                 [i - (len(df) - len(candles)) for i in confirmed_buy_idx],
                 [i - (len(df) - len(candles)) for i in confirmed_sell_idx],
-                recent_pivots,
-                tmo_main, tmo_signal, tmo_len, is_light_mode)
+                [], tmo_main, tmo_signal, tmo_len, kwargs.get('is_light_mode', False))
 
     return {
         'success': True, 'ticker': symbol, 'price': round(last_price, 2),
@@ -336,14 +326,14 @@ def analyze_ticker_local(symbol, signal_length=5, sma_signal=True, lin_reg=True,
     }
 
 # ----------------------------------------------------------------------
-# FULL HTML + JS (WITH HOVER ZOOM + LOUD VOICE + FIXED JS)
+# FULL HTML + JS v29.2
 # ----------------------------------------------------------------------
-HTML_TEMPLATE = r"""<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BUY/SELL Scanner v25 FINAL</title>
+<title>Linear Regression Candle Scanner</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * { box-sizing: border-box; margin:0; padding:0; }
@@ -353,7 +343,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 16px; line-height: 1.6; transition: var(--transition); }
 .container { max-width: 1400px; margin: 0 auto; position: relative; }
 .header { text-align: center; margin-bottom: 24px; }
-.header h1 { font-size: 1.8rem; font-weight: 700; background: linear-gradient(90deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.header h1 { font-size: 1.8rem; font-weight: 700; background: linear-gradient(90deg, #10b981, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 .glass-card { background: var(--card); backdrop-filter: blur(12px); border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid var(--border); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
 .input-group { margin-bottom: 16px; }
 .input-group label { font-size: 0.9rem; color: var(--text-light); font-weight: 500; display: block; margin-bottom: 6px; }
@@ -379,32 +369,12 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
 .spinner { border: 4px solid var(--glass); border-top: 4px solid var(--primary); border-radius: 50%; width: 36px; height: 36px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hidden { display: none !important; }
-
-/* HOVER ZOOM + GLOW */
-.preview-img {
-  width: 120px;
-  height: 60px;
-  border-radius: 8px;
-  cursor: zoom-in;
-  border: 1px solid var(--border);
-  object-fit: cover;
-  transition: all 0.3s ease;
-  display: block;
-  margin: 0 auto;
-}
-.preview-img:hover {
-  transform: scale(2.2) translateY(-15px);
-  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(59, 130, 246, 0.7);
-  z-index: 100;
-  border: 3px solid #3b82f6;
-}
-
+.preview-img { width: 120px; height: 60px; border-radius: 8px; cursor: zoom-in; border: 1px solid var(--border); object-fit: cover; transition: all 0.3s ease; display: block; margin: 0 auto; }
+.preview-img:hover { transform: scale(2.2) translateY(-15px); box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(16, 185, 129, 0.7); z-index: 100; border: 3px solid #10b981; }
 .signal-badge.BUY { background:#10b981; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
 .signal-badge.SELL { background:#ef4444; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
 .signal-badge.NEUTRAL { background:#64748b; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
-.pl-positive { color:#10b981; }
-.pl-negative { color:#ef4444; }
-.pl-zero { color:#94a3b8; }
+.pl-positive { color:#10b981; } .pl-negative { color:#ef4444; } .pl-zero { color:#94a3b8; }
 .tooltip { position:relative; display:inline-block; cursor:help; }
 .tooltip .tooltiptext { visibility:hidden; background:#1e293b; color:white; text-align:center; border-radius:6px; padding:5px; position:absolute; z-index:1; bottom:125%; left:50%; margin-left:-60px; width:120px; opacity:0; transition:opacity 0.3s; font-size:0.7rem; }
 .tooltip:hover .tooltiptext { visibility:visible; opacity:1; }
@@ -418,8 +388,8 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
   </div>
 
   <div class="header">
-    <h1>BUY/SELL Scanner v25 FINAL</h1>
-    <p><strong>REAL-TIME ONLY</strong> | YELLOW = Bull | PURPLE = Bear | <strong>LOUD VOICE + HOVER ZOOM</strong></p>
+    <h1>Linear Regression Candle Scanner</h1>
+   
   </div>
 
   <div id="msgBox" class="hidden"></div>
@@ -438,30 +408,21 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div class="input-group">
-        <label>Signal Length</label>
-        <input id="signalLength" value="5" type="number" min="1"/>
-      </div>
-      <div class="input-group">
-        <label>Signal Type</label>
+      <div class="input-group"><label>Signal Length</label><input id="signalLength" value="5" type="number" min="1"/></div>
+      <div class="input-group"><label>Signal Type</label>
         <div class="toggle-group">
           <button type="button" id="smaYes" class="toggle-btn active">SMA</button>
           <button type="button" id="emaYes" class="toggle-btn">EMA</button>
         </div>
       </div>
-      <div class="input-group">
-        <label>Lin-Reg Length</label>
-        <input id="linregLength" value="11" type="number" min="1"/>
-      </div>
-      <div class="input-group">
-        <label>Market</label>
+      <div class="input-group"><label>Lin-Reg Length</label><input id="linregLength" value="11" type="number" min="1"/></div>
+      <div class="input-group"><label>Market</label>
         <div class="toggle-group">
           <button type="button" id="toggleIndia" class="toggle-btn">India</button>
           <button type="button" id="toggleUSA" class="toggle-btn active">USA</button>
         </div>
       </div>
-      <div class="input-group">
-        <label>No Earnings in 7d?</label>
+      <div class="input-group"><label>No Earnings in 7d?</label>
         <div class="toggle-group">
           <button type="button" id="toggleEarningsYes" class="toggle-btn active">Yes</button>
           <button type="button" id="toggleEarningsNo" class="toggle-btn">No</button>
@@ -469,34 +430,15 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
       </div>
     </div>
 
-    <!-- TMO SETTINGS -->
     <details style="margin-top:16px;">
-      <summary style="cursor:pointer;font-weight:600;color:var(--primary);">True Momentum Oscillator (TMO)</summary>
+      <summary style="cursor:pointer;font-weight:600;color:var(--primary);">TMO Settings</summary>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px;">
-        <div class="input-group">
-          <label>Length</label>
-          <input id="tmoLength" value="14" type="number" min="1"/>
-        </div>
-        <div class="input-group">
-          <label>Calc Length</label>
-          <input id="tmoCalc" value="5" type="number" min="1"/>
-        </div>
-        <div class="input-group">
-          <label>Smooth Length</label>
-          <input id="tmoSmooth" value="3" type="number" min="1"/>
-        </div>
-        <div class="input-group">
-          <label>Length MA</label>
-          <select id="tmoLenType"><option>EMA</option><option>SMA</option><option>RMA</option></select>
-        </div>
-        <div class="input-group">
-          <label>Calc MA</label>
-          <select id="tmoCalcType"><option>EMA</option><option>SMA</option><option>RMA</option></select>
-        </div>
-        <div class="input-group">
-          <label>Smooth MA</label>
-          <select id="tmoSmoothType"><option>EMA</option><option>SMA</option><option>RMA</option></select>
-        </div>
+        <div class="input-group"><label>Length</label><input id="tmoLength" value="14" type="number" min="1"/></div>
+        <div class="input-group"><label>Calc Length</label><input id="tmoCalc" value="5" type="number" min="1"/></div>
+        <div class="input-group"><label>Smooth Length</label><input id="tmoSmooth" value="3" type="number" min="1"/></div>
+        <div class="input-group"><label>Length MA</label><select id="tmoLenType"><option>EMA</option><option>SMA</option><option>RMA</option></select></div>
+        <div class="input-group"><label>Calc MA</label><select id="tmoCalcType"><option>EMA</option><option>SMA</option><option>RMA</option></select></div>
+        <div class="input-group"><label>Smooth MA</label><select id="tmoSmoothType"><option>EMA</option><option>SMA</option><option>RMA</option></select></div>
       </div>
     </details>
 
@@ -540,7 +482,6 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
 </div>
 
 <script>
-// === STATE ===
 let results = JSON.parse(localStorage.getItem('linreg_results')||'[]');
 let trades = JSON.parse(localStorage.getItem('linreg_trades')||'{}');
 let watchlists = {usa:JSON.parse(localStorage.getItem('watchlist_usa')||'[]'), india:JSON.parse(localStorage.getItem('watchlist_india')||'[]')};
@@ -552,7 +493,6 @@ const BATCH_SIZE = 50;
 let renderQueue = [], renderTimer = null, eventSource = null;
 let currentMarket = 'usa', isLightMode = localStorage.getItem('theme') === 'light';
 let smaSignal = true, requireNoEarnings = true;
-
 let tmoLength = 14, tmoCalc = 5, tmoSmooth = 3;
 let tmoLenType = 'EMA', tmoCalcType = 'EMA', tmoSmoothType = 'EMA';
 
@@ -648,12 +588,14 @@ function buyStock(ticker, price){
   if(trades[ticker] && !trades[ticker].exit){ showMsg(`Already holding ${ticker}`); return; }
   trades[ticker] = {entry:price, exit:null, timestamp:Date.now()};
   saveTrades(); updateRowPL(ticker); showMsg(`BUY ${ticker} @ $${price}`, true);
+  speakSignal(ticker, 'BUY');
 }
 function sellStock(ticker, price){
   if(!trades[ticker] || trades[ticker].exit){ showMsg(`No position in ${ticker}`); return; }
   trades[ticker].exit = price; saveTrades(); updateRowPL(ticker);
   const pl = ((price - trades[ticker].entry)/trades[ticker].entry*100).toFixed(2);
   showMsg(`SELL ${ticker} @ $${price} | ${pl}%`, true);
+  speakSignal(ticker, 'SELL');
 }
 function updateRowPL(ticker){
   const row = [...document.querySelectorAll('#tableBody tr')].find(r=>r.cells[0].textContent.trim()===ticker);
@@ -670,7 +612,8 @@ function updateRowPL(ticker){
 function clearAllTrades(){
   if(!confirm('Clear all trades?')) return;
   trades = {}; saveTrades();
-  document.querySelectorAll('#tableBody tr').forEach(r=>r.cells[r.cells.length-1].innerHTML='-');
+  document.querySelectorAll('#tableBody tr')
+    .forEach(r=>r.cells[r.cells.length-1].innerHTML='-');
   showMsg('Trades cleared', true);
 }
 
@@ -689,39 +632,59 @@ async function scanStocks(){
 
   if(eventSource) eventSource.close();
 
-  const start = await fetch('/api/scan_start',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      tickers, market:currentMarket,
-      params:{
-        signal_length:signalLen, sma_signal:smaSignal, linreg_length:linregLen, require_no_earnings:requireNoEarnings,
-        tmo_length:tmoLength, tmo_calc:tmoCalc, tmo_smooth:tmoSmooth,
-        tmo_len_type:tmoLenType, tmo_calc_type:tmoCalcType, tmo_smooth_type:tmoSmoothType
-      },
-      is_light_mode:isLightMode
-    })
-  });
-  const sd = await start.json();
-  if(!sd.success){ hideSpinner(); showMsg(sd.error); return; }
-
-  eventSource = new EventSource(`/api/scan_stream?token=${sd.token}`);
-  eventSource.onmessage = e => {
-    if(e.data==='__END__'){ eventSource.close(); hideSpinner(); saveResults(); scheduleFinalFlush(); return; }
-    let res; try{ res = JSON.parse(e.data); }catch{ return; }
-    results.push(res); renderQueue.push(res);
-    if(renderQueue.length >= BATCH_SIZE) flushRenderQueue();
-    scheduleFinalFlush();
+  const payload = {
+    tickers: tickers,
+    market: currentMarket,
+    params: {
+      signal_length: signalLen,
+      sma_signal: smaSignal,
+      linreg_length: linregLen,
+      require_no_earnings: requireNoEarnings,
+      tmo_length: tmoLength,
+      tmo_calc: tmoCalc,
+      tmo_smooth: tmoSmooth,
+      tmo_len_type: tmoLenType,
+      tmo_calc_type: tmoCalcType,
+      tmo_smooth_type: tmoSmoothType
+    },
+    is_light_mode: isLightMode
   };
-  eventSource.onerror = () => { eventSource.close(); hideSpinner(); saveResults(); showMsg(results.length?'Partial results':'No data'); };
+
+  try {
+    const start = await fetch('/api/scan_start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const sd = await start.json();
+    if (!sd.success) { hideSpinner(); showMsg(sd.error); return; }
+
+    eventSource = new EventSource(`/api/scan_stream?token=${sd.token}`);
+    eventSource.onmessage = e => {
+      if (e.data === '__END__') {
+        eventSource.close(); hideSpinner(); saveResults(); scheduleFinalFlush(); return;
+      }
+      let res;
+      try { res = JSON.parse(e.data); } catch { return; }
+      results.push(res); renderQueue.push(res);
+      if (renderQueue.length >= BATCH_SIZE) flushRenderQueue();
+      scheduleFinalFlush();
+    };
+    eventSource.onerror = () => {
+      eventSource.close(); hideSpinner(); saveResults();
+      showMsg(results.length ? 'Partial results' : 'No data');
+    };
+  } catch (err) {
+    hideSpinner(); showMsg('Scan failed: ' + err.message);
+  }
 }
 
-// === LOUD VOICE ===
 let lastSpoken = 0;
 function speakSignal(ticker, signal){
   const now = Date.now();
   if(now - lastSpoken < 1500) return;
   lastSpoken = now;
-  const utterance = new SpeechSynthesisUtterance(`${ticker} is a ${signal}!`);
+  const utterance = new SpeechSynthesisUtterance(`${ticker} is a ${signal} signal!`);
   utterance.rate = 1.0; utterance.pitch = 1.1; utterance.volume = 1.0;
   window.speechSynthesis.speak(utterance);
 }
@@ -732,9 +695,11 @@ function flushRenderQueue(){
   for(const r of renderQueue){
     const tr = document.createElement('tr');
     if(r.signal==='BUY') tr.classList.add('buy-row');
+    if(r.signal==='SELL') tr.classList.add('sell-row');
     if(!r.success) tr.classList.add('error-row');
 
-    const img = r.chart_preview ? `<img src="${r.chart_preview}" class="preview-img" onclick="openModal('${r.chart_preview.replace(/'/g,"\\'")}')">` : '';
+    const safeSrc = r.chart_preview ? r.chart_preview.replace(/'/g, "\\'") : '';
+    const img = r.chart_preview ? `<img src="${r.chart_preview}" class="preview-img" onclick="openModal('${safeSrc}')">` : '';
     const earn = r.no_earnings_ok !== undefined ? `<div class="tooltip">${r.no_earnings_ok?'OK':'Soon'}<span class="tooltiptext">${r.tooltips.earnings}</span></div>` : '-';
 
     tr.innerHTML = `
@@ -745,12 +710,8 @@ function flushRenderQueue(){
       <td>${r.score}</td>
       <td>${earn}</td>
     `;
-    enhanceRowWithTradeButtons(tr, r.ticker);
+    enhanceRowWithTradeButtons(tr, r.ticker, r.price);
     frag.appendChild(tr);
-
-    if (r.signal === 'BUY' || r.signal === 'SELL') {
-      speakSignal(r.ticker, r.signal);
-    }
   }
 
   tbody.appendChild(frag);
@@ -759,13 +720,12 @@ function flushRenderQueue(){
 }
 
 function scheduleFinalFlush(){ clearTimeout(renderTimer); renderTimer = setTimeout(()=>{ flushRenderQueue(); sortTable(); }, 120); }
-function enhanceRowWithTradeButtons(tr, ticker){
+function enhanceRowWithTradeButtons(tr, ticker, price){
   const act = tr.insertCell(), pl = tr.insertCell();
   const held = trades[ticker] && !trades[ticker].exit;
-  const closed = trades[ticker] && trades[ticker].exit;
   act.innerHTML = `
-    <button class="action-btn buy-btn" onclick="buyStock('${ticker}',${tr.cells[2].textContent.replace('$','')||0})" ${held||closed?'disabled':''}>BUY</button>
-    <button class="action-btn sell-btn" onclick="sellStock('${ticker}',${tr.cells[2].textContent.replace('$','')||0})" ${!held?'disabled':''}>SELL</button>`;
+    <button class="action-btn buy-btn" onclick="buyStock('${ticker}',${price})" ${held?'disabled':''}>BUY</button>
+    <button class="action-btn sell-btn" onclick="sellStock('${ticker}',${price})" ${!held?'disabled':''}>SELL</button>`;
   updateRowPL(ticker);
 }
 function sortTable(){
@@ -775,6 +735,8 @@ function sortTable(){
     const sb = b.cells[3].querySelector('.signal-badge')?.textContent||'';
     if(sa==='BUY' && sb!=='BUY') return -1;
     if(sb==='BUY' && sa!=='BUY') return 1;
+    if(sa==='SELL' && sb!=='SELL') return -1;
+    if(sb==='SELL' && sa!=='SELL') return 1;
     return (parseInt(b.cells[4].textContent)||0) - (parseInt(a.cells[4].textContent)||0);
   });
   const tb = document.getElementById('tableBody'); tb.innerHTML=''; rows.forEach(r=>tb.appendChild(r));
@@ -795,7 +757,7 @@ function exportCSV(){
     const pl = tr.entry ? (tr.exit ? ((tr.exit-tr.entry)/tr.entry*100).toFixed(2) : ((r.price-tr.entry)/tr.entry*100).toFixed(2)) : '';
     return [r.ticker,r.price,r.signal,r.score,r.no_earnings_ok?'YES':'NO',r.earnings_date||'',tr.entry||'',tr.exit||'',pl];
   });
-  const csv = [headers, ...rows].map(r=>r.join(',')).join('\n');
+  const csv = [headers, ...rows].map(r=>r.join(',')).join('\\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download='scan.csv'; a.click();
 }
@@ -813,7 +775,7 @@ window.addEventListener('load', () => {
 </html>"""
 
 # ----------------------------------------------------------------------
-# Routes
+# ROUTES
 # ----------------------------------------------------------------------
 STREAM_TOKENS = {}
 
@@ -841,19 +803,8 @@ def scan_start():
     STREAM_TOKENS[token] = {
         'tickers': data.get('tickers', []),
         'market': data.get('market','usa'),
-        'params': {
-            'signal_length': int(p.get('signal_length',5)),
-            'sma_signal': p.get('sma_signal',True) in (True,'true','True'),
-            'linreg_length': int(p.get('linreg_length',11)),
-            'require_no_earnings': p.get('require_no_earnings',True) in (True,'true','True'),
-            'tmo_length': int(p.get('tmo_length',14)),
-            'tmo_calc': int(p.get('tmo_calc',5)),
-            'tmo_smooth': int(p.get('tmo_smooth',3)),
-            'tmo_len_type': p.get('tmo_len_type','EMA'),
-            'tmo_calc_type': p.get('tmo_calc_type','EMA'),
-            'tmo_smooth_type': p.get('tmo_smooth_type','EMA')
-        },
-        'is_light_mode': data.get('is_light_mode',False)
+        'params': {**p, 'sma_signal': p.get('sma_signal', True) in (True, 'true', 'True'), 'require_no_earnings': p.get('require_no_earnings', True) in (True, 'true', 'True')},
+        'is_light_mode': data.get('is_light_mode', False)
     }
     return jsonify({'success':True, 'token':token})
 
@@ -875,5 +826,5 @@ def scan_stream():
 atexit.register(lambda: plt.close('all'))
 
 if __name__ == '__main__':
-    print("Scanner → http://localhost:5000")
+    print("BUY/SELL Scanner v29.2 → http://127.0.0.1:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)

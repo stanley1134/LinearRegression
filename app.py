@@ -1,11 +1,5 @@
 """
-BUY/SELL Linear Regression Scanner v29.2 — FINAL BULLETPROOF
-- Signal Length default = 5
-- Lin-Reg Length = 11
-- BUY: 5 WHITE → GREEN + Close > Prev LinReg High
-- SELL: 3 GREEN → WHITE + Close < Prev LinReg Close
-- NO NEUTRAL on valid signals
-- NO ERRORS | NO CRASH | VOICE ALERTS | EXCEL | WATCHLIST
+Linear Regression Candle Scanner v29.3 + Alpaca Paper Trading
 """
 
 from flask import Flask, render_template_string, request, jsonify, Response
@@ -21,7 +15,13 @@ from matplotlib.patches import Rectangle
 from io import BytesIO, StringIO
 import requests
 
+# Import Alpaca Blueprint
+from alpaca_wrapper import alpaca_app
+
 app = Flask(__name__)
+
+# Register Alpaca routes under /alpaca
+app.register_blueprint(alpaca_app, url_prefix='/alpaca')
 
 # ----------------------------------------------------------------------
 # Cache & Helpers
@@ -137,7 +137,7 @@ def _safe_linreg(series, length):
     return pd.Series(result, index=s.index)
 
 # ----------------------------------------------------------------------
-# GREEN/WHITE CANDLES LOGIC — FULLY FIXED v29.2
+# GREEN/WHITE CANDLES LOGIC
 # ----------------------------------------------------------------------
 def linreg_candles(df, signal_length=11, sma_signal=True, lin_reg=True, linreg_length=11):
     o, h, l, c = df['Open'].values, df['High'].values, df['Low'].values, df['Close'].values
@@ -150,9 +150,7 @@ def linreg_candles(df, signal_length=11, sma_signal=True, lin_reg=True, linreg_l
     else:
         bopen, bhigh, blow, bclose = o, h, l, c
     
-    r = bopen < bclose  # True = GREEN (Bullish)
-    print(f"[{df.index[-1].date()}] Last 7 r (GREEN=True): {list(r[-7:])}")
-    print(f"Last close: {c[-1]:.4f}  |  Prev LinReg High: {bhigh[-2]:.4f}")
+    r = bopen < bclose
     bc_series = pd.Series(bclose)
     signal = (bc_series.rolling(signal_length, min_periods=1).mean()
               if sma_signal else
@@ -166,11 +164,9 @@ def linreg_candles(df, signal_length=11, sma_signal=True, lin_reg=True, linreg_l
         last_five_red   = not r[i-1] and not r[i-2] and not r[i-3] and not r[i-4] and not r[i-5]
         last_three_green = r[i-1] and r[i-2] and r[i-3]
 
-        # BUY: 5 WHITE → GREEN + Close > Previous LinReg High
         if (r[i] and not r[i-1] and c[i] > bhigh[i-1] and last_five_red and i == last_i):
             buy_idx.append(i)
 
-        # SELL: 3 GREEN → WHITE + Close < Previous LinReg Close
         if (not r[i] and r[i-1] and c[i] < bclose[i-1] and last_three_green and i == last_i):
             sell_idx.append(i)
 
@@ -227,7 +223,6 @@ def generate_linreg_chart(candles, signal, buy_idx, sell_idx, pivot_lows,
     ax_price.grid(True, alpha=0.2)
     ax_price.set_xticks([])
 
-    # TMO
     ax_tmo.set_facecolor('#ffffff' if is_light_mode else '#0f172a')
     x = range(len(tmo_main))
     ax_tmo.plot(x, tmo_main, color='#3b82f6', linewidth=1.5)
@@ -296,10 +291,6 @@ def analyze_ticker_local(symbol, **kwargs):
     tmo_main, tmo_signal, tmo_len = calculate_tmo(df, **tmo_args)
 
     last_price = candles[-1]['close'] if candles else df['Close'].iloc[-1]
-    #last_idx = len(candles) - 1
-
-    #confirmed_buy_idx  = [i for i in buy_idx if i == last_idx]
-    #confirmed_sell_idx = [i for i in sell_idx if i == last_idx]
 
     offset = len(df) - len(candles)
     last_df_idx = len(df) - 1
@@ -326,14 +317,14 @@ def analyze_ticker_local(symbol, **kwargs):
     }
 
 # ----------------------------------------------------------------------
-# FULL HTML + JS v29.2
+# FULL HTML + JS
 # ----------------------------------------------------------------------
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BUY/SELL Scanner v29.2</title>
+<title>Linear Regression Candle Scanner</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * { box-sizing: border-box; margin:0; padding:0; }
@@ -354,13 +345,11 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
 .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(59,130,246,0.5); }
 .btn-success { background: linear-gradient(135deg, #10b981, #34d399); color: white; }
 .btn-success:hover { transform: translateY(-2px); }
+.btn-danger { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
+.btn-danger:hover { transform: translateY(-2px); }
 .toggle-group { display: flex; gap: 8px; margin: 16px 0; }
 .toggle-btn { flex: 1; padding: 12px; border-radius: 12px; font-weight: 600; font-size: 0.9rem; background: var(--glass); border: 1px solid var(--border); color: var(--text-light); transition: var(--transition); cursor: pointer; min-height: 44px; }
 .toggle-btn.active { background: linear-gradient(135deg, var(--primary), #8b5cf6); color: white; border-color: transparent; }
-.action-btn { padding: 6px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer; border: none; min-width: 44px; }
-.action-btn:disabled { background: #64748b; color: #94a3b8; cursor: not-allowed; opacity: 0.6; }
-.buy-btn { background: #10b981; color: white; }
-.sell-btn { background: #ef4444; color: white; }
 .theme-toggle { position: fixed; top: 16px; right: 16px; z-index: 1000; width: 52px; height: 52px; border-radius: 50%; background: var(--card); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
 .theme-toggle:hover { transform: scale(1.1); }
 .modal { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; padding: 20px; }
@@ -370,14 +359,26 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
 @keyframes spin { to { transform: rotate(360deg); } }
 .hidden { display: none !important; }
 .preview-img { width: 120px; height: 60px; border-radius: 8px; cursor: zoom-in; border: 1px solid var(--border); object-fit: cover; transition: all 0.3s ease; display: block; margin: 0 auto; }
-.preview-img:hover { transform: scale(2.2) translateY(-15px); box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(16, 185, 129, 0.7); z-index: 100; border: 3px solid #10b981; }
+.preview-img:hover { transform: scale(2.2) translateY(-15px); box-shadow: 0 30px 60px rgba(0,0,0,0.6), 0 0 30px rgba(16,185,129,0.7); z-index: 100; border: 3px solid #10b981; }
 .signal-badge.BUY { background:#10b981; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
 .signal-badge.SELL { background:#ef4444; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
 .signal-badge.NEUTRAL { background:#64748b; color:white; padding:2px 6px; border-radius:4px; font-size:0.7rem; }
-.pl-positive { color:#10b981; } .pl-negative { color:#ef4444; } .pl-zero { color:#94a3b8; }
 .tooltip { position:relative; display:inline-block; cursor:help; }
 .tooltip .tooltiptext { visibility:hidden; background:#1e293b; color:white; text-align:center; border-radius:6px; padding:5px; position:absolute; z-index:1; bottom:125%; left:50%; margin-left:-60px; width:120px; opacity:0; transition:opacity 0.3s; font-size:0.7rem; }
 .tooltip:hover .tooltiptext { visibility:visible; opacity:1; }
+
+#resultsTable { width:100%; border-collapse:collapse; font-size:0.85rem; table-layout:fixed; }
+#resultsTable th { position:relative; cursor:pointer; user-select:none; text-align:left; padding:8px 4px; font-weight:600; }
+#resultsTable th:after { content:'up/down'; margin-left:4px; font-size:0.6rem; opacity:0.5; }
+#resultsTable th.sorted-asc:after  { content:'up'; opacity:1; }
+#resultsTable th.sorted-desc:after { content:'down'; opacity:1; }
+#resultsTable td { padding:6px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.col-ticker   { width:12%; }
+.col-chart    { width:14%; text-align:center; }
+.col-price    { width:10%; text-align:right; }
+.col-signal   { width:10%; text-align:center; }
+.col-score    { width:8%;  text-align:center; }
+.col-earnings { width:12%; text-align:center; }
 </style>
 </head>
 <body class="dark-mode">
@@ -388,8 +389,7 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
   </div>
 
   <div class="header">
-    <h1>BUY/SELL Scanner v29.2</h1>
-    <p><strong>GREEN = Bullish | WHITE = Bearish</strong> | 5 WHITE to GREEN = BUY | 3 GREEN to WHITE = SELL</p>
+    <h1>Linear Regression Candle Scanner</h1>
   </div>
 
   <div id="msgBox" class="hidden"></div>
@@ -455,6 +455,11 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
     <button type="button" class="btn btn-success" id="scanBtn" style="width:100%;margin-top:16px;">
       Scan Stocks
     </button>
+
+    <!-- ALPACA BUTTON -->
+    <button type="button" class="btn btn-primary" id="alpacaPositionsBtn" style="width:100%;margin-top:8px;">
+      Alpaca Positions
+    </button>
   </div>
 
   <div id="spinner" class="spinner hidden"></div>
@@ -463,30 +468,67 @@ body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--tex
     <div class="glass-card">
       <h3>Results (<span id="resultCount">0</span>)</h3>
       <div class="table-container" style="overflow-x:auto;">
-        <table id="resultsTable" style="width:100%;border-collapse:collapse;font-size:0.85rem;">
-          <thead><tr>
-            <th>Ticker</th><th>Chart</th><th>Price</th><th>Signal</th><th>Score</th><th>Earnings</th><th>Action</th><th>P/L</th>
-          </tr></thead>
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th class="col-ticker"   data-sort="ticker">Ticker up/down</th>
+              <th class="col-chart"    data-sort="none">Chart up/down</th>
+              <th class="col-price"    data-sort="price">Price up/down</th>
+              <th class="col-signal"   data-sort="signal">Signal up/down</th>
+              <th class="col-score"    data-sort="score">Score up/down</th>
+              <th class="col-earnings" data-sort="earnings">Earnings up/down</th>
+            </tr>
+          </thead>
           <tbody id="tableBody"></tbody>
         </table>
       </div>
       <button type="button" class="btn btn-primary" id="exportBtn" style="margin-top:12px;width:100%;">Export CSV</button>
-      <button type="button" class="btn btn-primary" id="clearTradesBtn" style="margin-top:8px;width:100%;">Clear All Trades</button>
     </div>
   </div>
 </div>
 
+<!-- CHART MODAL -->
 <div id="chartModal" class="modal">
   <span class="close">X</span>
   <img id="modalImage" src="" alt="Full Chart"/>
 </div>
 
+<!-- ALPACA MODAL -->
+<div id="alpacaModal" class="modal">
+  <div class="modal-content" style="
+    background:var(--card);
+    border-radius:16px;
+    padding:24px;
+    max-width:1100px;      /* ← WIDER */
+    width:95%;             /* ← RESPONSIVE */
+    max-height:90vh;       /* ← TALLER */
+    height:auto;
+    overflow:auto;
+    position:relative;
+    box-shadow:0 20px 50px rgba(0,0,0,0.4);
+  ">
+    <span class="close" style="
+      position:absolute;top:12px;right:18px;
+      font-size:32px;cursor:pointer;color:var(--text-light);
+    ">&times;</span>
+    
+    <h3 style="margin-top:0;font-size:1.4rem;">Alpaca Paper Positions</h3>
+    
+    <div id="alpacaPositionsBody" style="margin-top:12px;">
+      Loading...
+    </div>
+    
+    <div style="margin-top:16px;display:flex;gap:10px;">
+      <button id="alpacaRefreshBtn" class="btn btn-primary" style="flex:1;padding:12px;font-size:1rem;">Refresh</button>
+      <button id="alpacaCancelAllBtn" class="btn btn-danger" style="flex:1;padding:12px;font-size:1rem;">Cancel All Orders</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let results = JSON.parse(localStorage.getItem('linreg_results')||'[]');
-let trades = JSON.parse(localStorage.getItem('linreg_trades')||'{}');
 let watchlists = {usa:JSON.parse(localStorage.getItem('watchlist_usa')||'[]'), india:JSON.parse(localStorage.getItem('watchlist_india')||'[]')};
 function saveResults(){ localStorage.setItem('linreg_results', JSON.stringify(results)); }
-function saveTrades(){ localStorage.setItem('linreg_trades', JSON.stringify(trades)); }
 function saveWatchlists(){ localStorage.setItem('watchlist_usa', JSON.stringify(watchlists.usa)); localStorage.setItem('watchlist_india', JSON.stringify(watchlists.india)); }
 
 const BATCH_SIZE = 50;
@@ -540,12 +582,9 @@ document.getElementById('tmoCalcType').addEventListener('change', e => tmoCalcTy
 document.getElementById('tmoSmoothType').addEventListener('change', e => tmoSmoothType = e.target.value);
 
 document.getElementById('uploadBtn').addEventListener('click', uploadExcel);
-document.getElementById('scanBtn').addEventListener('click', scanStocks);
-document.getElementById('exportBtn').addEventListener('click', exportCSV);
 document.getElementById('loadWatchlistBtn').addEventListener('click', loadWatchlist);
 document.getElementById('saveCurrentBtn').addEventListener('click', saveCurrentToWatchlist);
-document.getElementById('clearTradesBtn').addEventListener('click', clearAllTrades);
-document.querySelector('.modal').addEventListener('click', e => { if(e.target === document.querySelector('.modal')) closeModal(); });
+document.querySelector('.modal').addEventListener('click', e => { if(e.target===document.querySelector('.modal')) closeModal(); });
 document.querySelector('.close').addEventListener('click', closeModal);
 
 async function uploadExcel(){
@@ -564,7 +603,6 @@ async function uploadExcel(){
     if(added.length){ watchlists[key].push(...added); saveWatchlists(); showMsg(`Added ${added.length} to ${key.toUpperCase()}`, true); }
   }catch(e){ showMsg('Upload error'); document.getElementById('excelStatus').textContent=''; }
 }
-
 function loadWatchlist(){
   const sel = document.getElementById('watchlistSelect').value;
   if(!sel) return showMsg('Select watchlist');
@@ -584,38 +622,8 @@ function saveCurrentToWatchlist(){
   showMsg(`Saved ${t.length} to ${currentMarket.toUpperCase()}`, true);
 }
 
-function buyStock(ticker, price){
-  if(trades[ticker] && !trades[ticker].exit){ showMsg(`Already holding ${ticker}`); return; }
-  trades[ticker] = {entry:price, exit:null, timestamp:Date.now()};
-  saveTrades(); updateRowPL(ticker); showMsg(`BUY ${ticker} @ $${price}`, true);
-  speakSignal(ticker, 'BUY');
-}
-function sellStock(ticker, price){
-  if(!trades[ticker] || trades[ticker].exit){ showMsg(`No position in ${ticker}`); return; }
-  trades[ticker].exit = price; saveTrades(); updateRowPL(ticker);
-  const pl = ((price - trades[ticker].entry)/trades[ticker].entry*100).toFixed(2);
-  showMsg(`SELL ${ticker} @ $${price} | ${pl}%`, true);
-  speakSignal(ticker, 'SELL');
-}
-function updateRowPL(ticker){
-  const row = [...document.querySelectorAll('#tableBody tr')].find(r=>r.cells[0].textContent.trim()===ticker);
-  if(!row) return;
-  const plCell = row.cells[row.cells.length-1];
-  const trade = trades[ticker];
-  if(!trade || !trade.entry){ plCell.innerHTML = '-'; return; }
-  const cur = parseFloat(row.cells[2].textContent.replace('$',''))||0;
-  const fin = trade.exit ?? cur;
-  const pct = ((fin-trade.entry)/trade.entry*100).toFixed(2);
-  const cls = trade.exit ? (pct>0?'pl-positive':pct<0?'pl-negative':'pl-zero') : (cur>trade.entry?'pl-positive':cur<trade.entry?'pl-negative':'pl-zero');
-  plCell.innerHTML = `<span class="${cls}">${pct>0?'+':''}${pct}%</span>`;
-}
-function clearAllTrades(){
-  if(!confirm('Clear all trades?')) return;
-  trades = {}; saveTrades();
-  document.querySelectorAll('#tableBody tr')
-    .forEach(r=>r.cells[r.cells.length-1].innerHTML='-');
-  showMsg('Trades cleared', true);
-}
+document.getElementById('scanBtn').addEventListener('click', scanStocks);
+document.getElementById('exportBtn').addEventListener('click', exportCSV);
 
 async function scanStocks(){
   showSpinner();
@@ -633,60 +641,31 @@ async function scanStocks(){
   if(eventSource) eventSource.close();
 
   const payload = {
-    tickers: tickers,
-    market: currentMarket,
+    tickers, market: currentMarket,
     params: {
-      signal_length: signalLen,
-      sma_signal: smaSignal,
-      linreg_length: linregLen,
+      signal_length: signalLen, sma_signal: smaSignal, linreg_length: linregLen,
       require_no_earnings: requireNoEarnings,
-      tmo_length: tmoLength,
-      tmo_calc: tmoCalc,
-      tmo_smooth: tmoSmooth,
-      tmo_len_type: tmoLenType,
-      tmo_calc_type: tmoCalcType,
-      tmo_smooth_type: tmoSmoothType
+      tmo_length: tmoLength, tmo_calc: tmoCalc, tmo_smooth: tmoSmooth,
+      tmo_len_type: tmoLenType, tmo_calc_type: tmoCalcType, tmo_smooth_type: tmoSmoothType
     },
     is_light_mode: isLightMode
   };
 
   try {
-    const start = await fetch('/api/scan_start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const start = await fetch('/api/scan_start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const sd = await start.json();
     if (!sd.success) { hideSpinner(); showMsg(sd.error); return; }
 
     eventSource = new EventSource(`/api/scan_stream?token=${sd.token}`);
     eventSource.onmessage = e => {
-      if (e.data === '__END__') {
-        eventSource.close(); hideSpinner(); saveResults(); scheduleFinalFlush(); return;
-      }
-      let res;
-      try { res = JSON.parse(e.data); } catch { return; }
+      if (e.data === '__END__') { eventSource.close(); hideSpinner(); saveResults(); scheduleFinalFlush(); return; }
+      let res; try { res = JSON.parse(e.data); } catch { return; }
       results.push(res); renderQueue.push(res);
       if (renderQueue.length >= BATCH_SIZE) flushRenderQueue();
       scheduleFinalFlush();
     };
-    eventSource.onerror = () => {
-      eventSource.close(); hideSpinner(); saveResults();
-      showMsg(results.length ? 'Partial results' : 'No data');
-    };
-  } catch (err) {
-    hideSpinner(); showMsg('Scan failed: ' + err.message);
-  }
-}
-
-let lastSpoken = 0;
-function speakSignal(ticker, signal){
-  const now = Date.now();
-  if(now - lastSpoken < 1500) return;
-  lastSpoken = now;
-  const utterance = new SpeechSynthesisUtterance(`${ticker} is a ${signal} signal!`);
-  utterance.rate = 1.0; utterance.pitch = 1.1; utterance.volume = 1.0;
-  window.speechSynthesis.speak(utterance);
+    eventSource.onerror = () => { eventSource.close(); hideSpinner(); saveResults(); showMsg(results.length?'Partial results':'No data'); };
+  } catch (err) { hideSpinner(); showMsg('Scan failed: '+err.message); }
 }
 
 function flushRenderQueue(){
@@ -694,50 +673,52 @@ function flushRenderQueue(){
   const frag = document.createDocumentFragment(), tbody = document.getElementById('tableBody');
   for(const r of renderQueue){
     const tr = document.createElement('tr');
-    if(r.signal==='BUY') tr.classList.add('buy-row');
-    if(r.signal==='SELL') tr.classList.add('sell-row');
-    if(!r.success) tr.classList.add('error-row');
-
     const safeSrc = r.chart_preview ? r.chart_preview.replace(/'/g, "\\'") : '';
     const img = r.chart_preview ? `<img src="${r.chart_preview}" class="preview-img" onclick="openModal('${safeSrc}')">` : '';
     const earn = r.no_earnings_ok !== undefined ? `<div class="tooltip">${r.no_earnings_ok?'OK':'Soon'}<span class="tooltiptext">${r.tooltips.earnings}</span></div>` : '-';
 
     tr.innerHTML = `
-      <td><strong>${r.ticker}</strong></td>
-      <td>${img}</td>
-      <td>$${r.price}</td>
-      <td><span class="signal-badge ${r.signal}">${r.signal}</span></td>
-      <td>${r.score}</td>
-      <td>${earn}</td>
+      <td class="col-ticker"><strong>${r.ticker}</strong></td>
+      <td class="col-chart">${img}</td>
+      <td class="col-price">$${r.price}</td>
+      <td class="col-signal"><span class="signal-badge ${r.signal}">${r.signal}</span></td>
+      <td class="col-score">${r.score}</td>
+      <td class="col-earnings">${earn}</td>
     `;
-    enhanceRowWithTradeButtons(tr, r.ticker, r.price);
     frag.appendChild(tr);
   }
-
   tbody.appendChild(frag);
   renderQueue = [];
   document.getElementById('resultCount').textContent = results.length;
 }
+function scheduleFinalFlush(){ clearTimeout(renderTimer); renderTimer = setTimeout(()=>{ flushRenderQueue(); }, 120); }
 
-function scheduleFinalFlush(){ clearTimeout(renderTimer); renderTimer = setTimeout(()=>{ flushRenderQueue(); sortTable(); }, 120); }
-function enhanceRowWithTradeButtons(tr, ticker, price){
-  const act = tr.insertCell(), pl = tr.insertCell();
-  const held = trades[ticker] && !trades[ticker].exit;
-  act.innerHTML = `
-    <button class="action-btn buy-btn" onclick="buyStock('${ticker}',${price})" ${held?'disabled':''}>BUY</button>
-    <button class="action-btn sell-btn" onclick="sellStock('${ticker}',${price})" ${!held?'disabled':''}>SELL</button>`;
-  updateRowPL(ticker);
-}
-function sortTable(){
+let sortState = {};
+document.querySelectorAll('#resultsTable th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if(key==='none') return;
+    const dir = sortState[key] === 'asc' ? 'desc' : 'asc';
+    sortState = { [key]: dir };
+    document.querySelectorAll('#resultsTable th').forEach(h=>h.classList.remove('sorted-asc','sorted-desc'));
+    th.classList.add('sorted-'+dir);
+    sortTable(key, dir);
+  });
+});
+function sortTable(key, dir){
   const rows = Array.from(document.getElementById('tableBody').rows);
   rows.sort((a,b) => {
-    const sa = a.cells[3].querySelector('.signal-badge')?.textContent||'';
-    const sb = b.cells[3].querySelector('.signal-badge')?.textContent||'';
-    if(sa==='BUY' && sb!=='BUY') return -1;
-    if(sb==='BUY' && sa!=='BUY') return 1;
-    if(sa==='SELL' && sb!=='SELL') return -1;
-    if(sb==='SELL' && sa!=='SELL') return 1;
-    return (parseInt(b.cells[4].textContent)||0) - (parseInt(a.cells[4].textContent)||0);
+    let av, bv;
+    switch(key){
+      case 'ticker':   av = a.cells[0].textContent.trim(); bv = b.cells[0].textContent.trim(); break;
+      case 'price':    av = parseFloat(a.cells[2].textContent.replace('$',''))||0; bv = parseFloat(b.cells[2].textContent.replace('$',''))||0; break;
+      case 'signal':   av = a.cells[3].querySelector('.signal-badge')?.textContent||''; bv = b.cells[3].querySelector('.signal-badge')?.textContent||''; break;
+      case 'score':    av = parseInt(a.cells[4].textContent)||0; bv = parseInt(b.cells[4].textContent)||0; break;
+      case 'earnings': av = a.cells[5].textContent.trim(); bv = b.cells[5].textContent.trim(); break;
+    }
+    if(av===bv) return 0;
+    const order = (dir==='asc') ? (av>bv?1:-1) : (av>bv?-1:1);
+    return order;
   });
   const tb = document.getElementById('tableBody'); tb.innerHTML=''; rows.forEach(r=>tb.appendChild(r));
 }
@@ -746,28 +727,67 @@ function openModal(src){
   const m = document.getElementById('chartModal'), i = document.getElementById('modalImage');
   i.src = src; m.style.display = 'flex';
 }
-function closeModal(){
-  document.getElementById('chartModal').style.display = 'none';
-}
+function closeModal(){ document.getElementById('chartModal').style.display = 'none'; }
 
 function exportCSV(){
-  const headers = ['Ticker','Price','Signal','Score','EarningsOK','EarningsDate','Entry','Exit','PL'];
-  const rows = results.map(r => {
-    const tr = trades[r.ticker] || {};
-    const pl = tr.entry ? (tr.exit ? ((tr.exit-tr.entry)/tr.entry*100).toFixed(2) : ((r.price-tr.entry)/tr.entry*100).toFixed(2)) : '';
-    return [r.ticker,r.price,r.signal,r.score,r.no_earnings_ok?'YES':'NO',r.earnings_date||'',tr.entry||'',tr.exit||'',pl];
-  });
+  const headers = ['Ticker','Price','Signal','Score','EarningsOK','EarningsDate'];
+  const rows = results.map(r => [
+    r.ticker, r.price, r.signal, r.score,
+    r.no_earnings_ok?'YES':'NO', r.earnings_date||''
+  ]);
   const csv = [headers, ...rows].map(r=>r.join(',')).join('\\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download='scan.csv'; a.click();
 }
+
+// ---------- ALPACA MODAL ----------
+const alpacaModal = document.getElementById('alpacaModal');
+const alpacaBody   = document.getElementById('alpacaPositionsBody');
+const alpacaClose  = alpacaModal.querySelector('.close');
+const alpacaRefresh = document.getElementById('alpacaRefreshBtn');
+const alpacaCancel  = document.getElementById('alpacaCancelAllBtn');
+
+function openAlpacaModal() {
+  alpacaBody.innerHTML = '<p style="text-align:center;color:var(--text-light);">Loading positions...</p>';
+  alpacaModal.style.display = 'flex';
+  fetch('/alpaca/positions')
+    .then(r => r.text())
+    .then(html => {
+      alpacaBody.innerHTML = html || '<p style="color:#ef4444">No data returned.</p>';
+    })
+    .catch(err => {
+      console.error(err);
+      alpacaBody.innerHTML = '<p style="color:#ef4444">Failed to load positions.</p>';
+    });
+}
+
+function closeAlpacaModal() {
+  alpacaModal.style.display = 'none';
+}
+
+document.getElementById('alpacaPositionsBtn').addEventListener('click', openAlpacaModal);
+alpacaClose.addEventListener('click', closeAlpacaModal);
+alpacaModal.addEventListener('click', e => {
+  if (e.target === alpacaModal) closeAlpacaModal();
+});
+alpacaRefresh.addEventListener('click', openAlpacaModal);
+alpacaCancel.addEventListener('click', () => {
+  if (!confirm('Cancel ALL open orders?')) return;
+  fetch('/alpaca/cancel_all', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      alert(d.msg || 'Orders cancelled.');
+      openAlpacaModal();
+    })
+    .catch(() => alert('Failed to cancel orders.'));
+});
 
 window.addEventListener('load', () => {
   hideSpinner();
   if(results.length){
     document.getElementById('results').classList.remove('hidden');
     document.getElementById('resultCount').textContent = results.length;
-    renderQueue = results.slice(); flushRenderQueue(); sortTable();
+    renderQueue = results.slice(); flushRenderQueue();
   }
 });
 </script>
@@ -826,5 +846,5 @@ def scan_stream():
 atexit.register(lambda: plt.close('all'))
 
 if __name__ == '__main__':
-    print("BUY/SELL Scanner v29.2 → http://127.0.0.1:5000")
+    print("Scanner + Alpaca → http://127.0.0.1:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)
